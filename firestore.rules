@@ -1,0 +1,88 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isAuthenticated() && request.auth.uid == uid;
+    }
+
+    function isCaregiverOf(elderUid) {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/elders/$(elderUid)/caregivers/$(request.auth.uid));
+    }
+
+    // 1. Users collection
+    match /users/{uid} {
+      allow read: if isAuthenticated();
+      // Client may create profile once; role is immutable thereafter
+      allow create: if isOwner(uid) && request.resource.data.role in ['elder', 'caregiver'];
+      allow update: if isOwner(uid) && request.resource.data.role == resource.data.role;
+      allow delete: if false;
+    }
+
+    // 2. Connections collection (Backend-written only)
+    match /connections/{connectionId} {
+      allow read: if isAuthenticated() && (
+        resource.data.caregiver_id == request.auth.uid ||
+        resource.data.elder_id == request.auth.uid
+      );
+      allow write: if false; // Only backend writes
+    }
+
+    // 3. Elder root document and caregiver subcollection
+    match /elders/{elderUid} {
+      allow read: if isOwner(elderUid) || isCaregiverOf(elderUid);
+      allow write: if false;
+
+      match /caregivers/{caregiverUid} {
+        allow read: if isOwner(elderUid) || isOwner(caregiverUid);
+        allow write: if false; // Written only by backend on pairing acceptance/revocation
+      }
+
+      match /medications/{medicationId} {
+        allow read: if isOwner(elderUid) || isCaregiverOf(elderUid);
+        allow write: if false; // Written by backend
+      }
+
+      match /dose_instances/{doseId} {
+        allow read: if isOwner(elderUid) || isCaregiverOf(elderUid);
+        allow write: if false; // Written by backend (APScheduler / dose endpoints)
+      }
+    }
+
+    // 4. Health Events (Backend-written only)
+    match /health_events/{eventId} {
+      allow read: if isAuthenticated() && (
+        resource.data.elder_id == request.auth.uid ||
+        isCaregiverOf(resource.data.elder_id)
+      );
+      allow write: if false;
+    }
+
+    // 5. Alerts (Backend-written only)
+    match /alerts/{alertId} {
+      allow read: if isAuthenticated() &&
+        resource.data.recipient_uid_or_contact == request.auth.uid &&
+        isCaregiverOf(resource.data.elder_id);
+      allow write: if false;
+    }
+
+    // 6. Notification Settings (Caregiver configuration)
+    match /notification_settings/{caregiverUid} {
+      allow read: if isOwner(caregiverUid);
+      allow write: if false; // Written via backend validation only
+    }
+
+    // 7. Audit Logs (Privileged, backend-only)
+    match /audit_logs/{logId} {
+      allow read: if false;
+      allow write: if false;
+    }
+  }
+}
+
